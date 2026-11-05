@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>OrientationFieldCollectorV3 — Prototype</title>
+<style>
+body{font-family:system-ui,Segoe UI,Helvetica,Arial;color:#222;padding:16px}
+textarea{width:100%;height:120px;font-family:monospace}
+button{margin:6px 4px}
+label{display:block;margin-top:8px}
+#canvas{width:100%;height:300px;border:1px solid #ccc;display:block}
+small{color:#555}
+</style>
+</head>
+<body>
+<h2>OrientationFieldCollectorV3 — Prototype</h2>
+<p>I am Marmalade. Load CSV or JSON time-series of module poses, normalize them, and inspect a quick orientation trace.</p>
+<label>Paste CSV or JSON input:</label>
+<textarea id="input"></textarea>
+<div>
+<button id="loadSample">Load Sample</button>
+<button id="parse">Parse</button>
+<button id="export">Export CSV</button>
+</div>
+<label>Time column name: <input id="timeKey" value="t"/></label>
+<label>Orientation format: 
+<select id="fmt"><option value="euler">Euler (roll,pitch,yaw)</option><option value="quat">Quaternion (qx,qy,qz,qw)</option></select>
+</label>
+<small>Euler angles are degrees. CSV header should include columns like: t,roll,pitch,yaw or t,qx,qy,qz,qw</small>
+<pre id="output"></pre>
+<canvas id="canvas"></canvas>
+<script>
+// Minimal parser and normalizer
+function parseCSV(text){
+ const lines = text.trim().split(/\r?\n/).filter(l=>l.trim());
+ const hdr = lines[0].split(/,|\t/).map(s=>s.trim());
+ return lines.slice(1).map(l=>{
+   const vals = l.split(/,|\t/).map(s=>s.trim());
+   const obj = {};
+   hdr.forEach((h,i)=>obj[h]=vals[i]||"");
+   return obj;
+ });
+}
+function tryParseJSON(text){ try{return JSON.parse(text);}catch(e){return null;} }
+function toNum(x){const n=parseFloat(x);return isFinite(n)?n:NaN}
+function eulerToQuat(roll,pitch,yaw){ // degrees to quaternion, roll(X),pitch(Y),yaw(Z)
+ const r = roll*Math.PI/180/2, p=pitch*Math.PI/180/2, y=yaw*Math.PI/180/2;
+ const sr=Math.sin(r), cr=Math.cos(r), sp=Math.sin(p), cp=Math.cos(p), sy=Math.sin(y), cy=Math.cos(y);
+ const qw = cr*cp*cy + sr*sp*sy;
+ const qx = sr*cp*cy - cr*sp*sy;
+ const qy = cr*sp*cy + sr*cp*sy;
+ const qz = cr*cp*sy - sr*sp*cy;
+ return [qx,qy,qz,qw];
+}
+function normalizeRecords(records, opts){
+ // records: array of objects with time and orientation fields
+ const tKey = opts.timeKey;
+ const fmt = opts.fmt;
+ const out = [];
+ for(const r of records){
+   const t = toNum(r[tKey]);
+   if(!isFinite(t)) continue;
+   let q=null;
+   if(fmt==='euler'){
+     const roll=toNum(r.roll||r.r||r.rx||r[ 'roll' ]);
+     const pitch=toNum(r.pitch||r.p||r.ry||r[ 'pitch' ]);
+     const yaw=toNum(r.yaw||r.y||r.rz||r[ 'yaw' ]);
+     if([roll,pitch,yaw].some(x=>isNaN(x))) continue;
+     q = eulerToQuat(roll,pitch,yaw);
+   } else {
+     const qx=toNum(r.qx||r.x||r[ 'qx' ]);
+     const qy=toNum(r.qy||r.y||r[ 'qy' ]);
+     const qz=toNum(r.qz||r.z||r[ 'qz' ]);
+     const qw=toNum(r.qw||r.w||r[ 'qw' ]);
+     if([qx,qy,qz,qw].some(x=>isNaN(x))) continue;
+     q=[qx,qy,qz,qw];
+   }
+   out.push({t:q && t, q});
+ }
+ // normalize time to start at 0 and sort
+ out.sort((a,b)=>a.t-b.t);
+ if(out.length===0) return out;
+ const t0=out[0].t;
+ for(const o of out) o.t = o.t - t0;
+ return out;
+}
+function toCSV(records){
+ let s='t,qx,qy,qz,qw\n';
+ for(const r of records) s+=r.t+','+r.q.join(',')+'\n';
+ return s;
+}
+// simple 3D orientation trace by mapping quaternion to a direction vector (rotating z-axis)
+function drawTrace(records){
+ const c=document.getElementById('canvas');
+ c.width=c.clientWidth; c.height=c.clientHeight;
+ const ctx=c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
+ if(records.length===0) return;
+ ctx.strokeStyle='#c55'; ctx.lineWidth=2; ctx.beginPath();
+ const margin=20, W=c.width-2*margin, H=c.height-2*margin;
+ for(let i=0;i<records.length;i++){
+   const [x,y,z,w]=records[i].q; // quaternion
+   // rotate z axis (0,0,1)
+   // v' = q * (0,0,1) * q^{-1}
+   const vx = 2*(x*z + w*y);
+   const vy = 2*(y*z - w*x);
+   const nx = (vx+1)/2, ny = (vy+1)/2;
+   const px = margin + nx*W, py = margin + (1-ny)*H;
+   if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+ }
+ ctx.stroke();
+}
+// UI
+document.getElementById('loadSample').onclick=()=>{
+ const sample='t,roll,pitch,yaw\n0,0,0,0\n1,10,5,20\n2,20,10,40\n3,30,15,60';
+ document.getElementById('input').value=sample;
+};
+document.getElementById('parse').onclick=()=>{
+ const txt=document.getElementById('input').value.trim();
+ if(!txt){document.getElementById('output').textContent='No input';return}
+ let records=null;
+ const j=tryParseJSON(txt);
+ if(j){
+   if(Array.isArray(j)) records=j; else {document.getElementById('output').textContent='JSON must be an array of records.';return}
+ } else {
+   try{records=parseCSV(txt);}catch(e){document.getElementById('output').textContent='Failed to parse CSV';return}
+ }
+ const opts={timeKey:document.getElementById('timeKey').value||'t',fmt:document.getElementById('fmt').value};
+ const norm=normalizeRecords(records,opts);
+ document._last=norm; // stash
+ document.getElementById('output').textContent=toCSV(norm);
+ drawTrace(norm);
+};
+document.getElementById('export').onclick=()=>{
+ const norm=document._last||[];
+ const csv=toCSV(norm);
+ const blob=new Blob([csv],{type:'text/csv'});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement('a'); a.href=url; a.download='normalized_orientations.csv'; a.click(); URL.revokeObjectURL(url);
+};
+// initial canvas size
+window.addEventListener('resize',()=>drawTrace(document._last||[]));
+</script>
+</body>
+</html>
